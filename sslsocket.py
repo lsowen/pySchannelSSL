@@ -64,14 +64,6 @@ class SSLSocket(socket):
             self.settimeout(timeout)        
     
     def recv_into(self, buffer, nbytes = 0, flags = 0, raw = False):
-        if nbytes == 0:
-            nbytes = len(buffer)
-        data = self.recv(nbytes, flags, raw)
-        length = len(data)
-        buffer[:length] = data
-        return length
-        
-        
         if not raw:
             if nbytes == 0:
                 nbytes = len(buffer)

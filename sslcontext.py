@@ -132,14 +132,33 @@ class SecurityFunctionTable(Structure):
 class SSLContext(object):
      
     def __init__(self):
+        self._CertSystemStore = None
+        
+        self._InitSecurityInterface()
+        self._creds = None
+        self._context = _SecHandle()
+        
+        self._SchannelCred = None
+        
+        self.reset()
+    
+    def __del__(self):
+        if self._CertSystemStore is not None:
+            CRYPT32.CertCloseStore(self._CertSystemStore, 0)        
+    
+    def reset(self):
+        #if self._CertSystemStore is not None:
+        #    CRYPT32.CertCloseStore(self._CertSystemStore, 0)
+        
+        if self._creds is not None:
+            windll.Secur32.FreeCredentialsHandle(byref(self._creds))
         
         self._CertSystemStore = None
-        self._InitSecurityInterface()
+
         self._creds = _SecHandle()
         self._creds.dwUpper = 0;
         self._creds.dwLower = 0;
         
-        self._context = _SecHandle()
         self._context.dwUpper = 0;
         self._context.dwLower = 0;
 
@@ -149,10 +168,12 @@ class SSLContext(object):
         
         self._intialized = False
         
-        self._recv_buffer = b''
+        self._recv_buffer = b'' # Raw socket data
+        self._recv_buffer_decrypted = b'' # socket data that is decrypted
         
     
     def do_handshake(self):
+        self.reset()
         self._ClientCreateCredentials()
         self._ClientHandshake()
         #TODO: validate remote certificate
@@ -398,7 +419,13 @@ class SSLContext(object):
         if self._intialized is False and plaintext is True:
             return self._sock.recv(buffersize, flags, raw = True)
         else:
-            decrypted_data = b''
+            
+            if len(self._recv_buffer_decrypted) > 0:
+                decrypted_data = self._recv_buffer_decrypted[:buffersize]
+                self._recv_buffer_decrypted = self._recv_buffer_decrypted[buffersize:]
+                return decrypted_data
+            
+            decrypted_data = self._recv_buffer_decrypted
             shouldContinue = True
             while shouldContinue:
                 self._recv_buffer += self._sock.recv(buffersize, flags, raw = True)
@@ -429,7 +456,7 @@ class SSLContext(object):
                 
                 for idx in range(1,4):
                     if messageBuffers.pBuffers[idx].BufferType == SECBUFFER_DATA:
-                        decrypted_data = string_at(messageBuffers.pBuffers[idx].pvBuffer, messageBuffers.pBuffers[idx].cbBuffer)
+                        decrypted_data += string_at(messageBuffers.pBuffers[idx].pvBuffer, messageBuffers.pBuffers[idx].cbBuffer)
                         break
                     
                 extra_data = b''
@@ -452,8 +479,10 @@ class SSLContext(object):
                         raise SSLError(WinError(c_long(Status).value))
                 elif Status != SEC_E_OK:
                     raise SSLError(WinError(c_long(Status).value))
-                
-            return decrypted_data
+            
+               
+            self._recv_buffer_decrypted = decrypted_data[buffersize:]
+            return decrypted_data[:buffersize]
    
    
    
