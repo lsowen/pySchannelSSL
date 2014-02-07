@@ -8,7 +8,6 @@ import sys
 
 CRYPT32 = windll.Crypt32
 SCHANNEL = windll.SChannel
-NULL = POINTER(c_int)()
 
 # Lots of "Magic" constants, mainly from schannel.h
 
@@ -20,6 +19,9 @@ SECPKG_ATTR_REMOTE_CERT_CONTEXT = 0x53
 SECPKG_ATTR_STREAM_SIZES = 4
 
 SP_PROT_SSL3_CLIENT = 0x00000020
+SP_PROT_SSL2_CLIENT = 0x00000008
+SP_PROT_TLS1_1_CLIENT = 0x00000200
+
 
 SCHANNEL_CRED_VERSION = 0x00000004
 
@@ -47,6 +49,7 @@ ISC_REQ_STREAM = 0x00010000
 
 SEC_I_CONTINUE_NEEDED = 0x00090312
 SEC_I_INCOMPLETE_CREDENTIALS = 0x00090320
+SEC_I_RENEGOTIATE = 0x00090321
 SEC_E_INCOMPLETE_MESSAGE = 0x80090318
 SEC_E_INTERNAL_ERROR = 0x80090304
 SEC_E_OK = 0x00000000
@@ -100,11 +103,11 @@ class SecurityFunctionTable(Structure):
     _fields_ = [("dwVersion", ULONG),
                 ("EnumerateSecurityPackages", WINFUNCTYPE(LONG)),
                 ("QueryCredentialsAttributes", WINFUNCTYPE(LONG)),
-                ("AcquireCredentialsHandle", WINFUNCTYPE(LONG, c_void_p, c_wchar_p, ULONG, HANDLE, c_void_p, c_void_p, c_void_p, HANDLE, PULONG)),
+                ("AcquireCredentialsHandle", WINFUNCTYPE(ULONG, c_void_p, c_wchar_p, ULONG, HANDLE, c_void_p, c_void_p, c_void_p, HANDLE, PULONG)),
                 ("FreeCredentialsHandle", WINFUNCTYPE(LONG)),
                 ("Reserved2", c_void_p),
                 ("InitializeSecurityContext", WINFUNCTYPE(ULONG, c_void_p, c_void_p, c_wchar_p, ULONG, ULONG, ULONG, c_void_p, ULONG, c_void_p, c_void_p, POINTER(ULONG), POINTER(ULONG))),
-                ("AcceptSecurityContext", WINFUNCTYPE(LONG)),
+                ("AcceptSecurityContext", WINFUNCTYPE(ULONG)),
                 ("CompleteAuthToken", WINFUNCTYPE(LONG)),
                 ("DeleteSecurityContext", WINFUNCTYPE(LONG, c_void_p)),
                 ("ApplyControlToken", WINFUNCTYPE(LONG)),
@@ -122,13 +125,12 @@ class SecurityFunctionTable(Structure):
                 ("AddCredentials", WINFUNCTYPE(LONG)),
                 ("Reserved8", c_void_p),
                 ("QuerySecurityContextToken", WINFUNCTYPE(LONG)),
-                ("EncryptMessage", WINFUNCTYPE(LONG, HANDLE, ULONG, HANDLE, ULONG)),
-                ("DecryptMessage", WINFUNCTYPE(LONG, HANDLE, HANDLE, ULONG, PULONG)),
+                ("EncryptMessage", WINFUNCTYPE(ULONG, HANDLE, ULONG, HANDLE, ULONG)),
+                ("DecryptMessage", WINFUNCTYPE(ULONG, HANDLE, HANDLE, ULONG, PULONG)),
                 ("SetContextAttributes", WINFUNCTYPE(LONG)),]
 
 class SSLContext(object):
-    
-    
+     
     def __init__(self):
         
         self._CertSystemStore = None
@@ -144,14 +146,18 @@ class SSLContext(object):
 
         self._SchannelCred = SCHANNEL_CRED()
         
+        
+        self._intialized = False
+        
+        self._recv_buffer = b''
+        
     
     def do_handshake(self):
         self._ClientCreateCredentials()
         self._ClientHandshake()
+        #TODO: validate remote certificate
         
-        CertContextPointer = POINTER(CERT_CONTEXT)()
-        Status = self._securityFunc.QueryContextAttributes(byref(self._context),SECPKG_ATTR_REMOTE_CERT_CONTEXT, byref(CertContextPointer))
-        #print(Status)
+        self._intialized = True #all communications should now be encrypted
         
     def _ClientHandshake(self):
         buffer = SecBuffer()
@@ -189,7 +195,7 @@ class SSLContext(object):
 
             if buffer.cbBuffer != 0 and buffer.pvBuffer is not None:
                 data = string_at(buffer.pvBuffer, buffer.cbBuffer)
-                if self._sock.sendall(data, encrypt = False) == 0:
+                if self.send(data, plaintext = True) == 0:
                     self._securityFunc.FreeContextBuffer(buffer.pvBuffer)
                     self._securityFunc.DeleteSecurityContext(byref(self._context))
     
@@ -206,19 +212,21 @@ class SSLContext(object):
         Status = SEC_I_CONTINUE_NEEDED
         
         dwSSPIFlags = ISC_REQ_SEQUENCE_DETECT | ISC_REQ_REPLAY_DETECT | ISC_REQ_CONFIDENTIALITY | ISC_REQ_EXTENDED_ERROR | ISC_REQ_ALLOCATE_MEMORY | ISC_REQ_STREAM
-        dwSSPIFlags |=  0x00080000
         
         dwSSPIOutFlags = DWORD()
         
-        recv_data = b""
+        recv_data = b''
         
-        while Status == SEC_I_CONTINUE_NEEDED or Status == SEC_I_INCOMPLETE_CREDENTIALS or Status == SEC_E_INCOMPLETE_MESSAGE:
+        while Status == SEC_I_CONTINUE_NEEDED or Status == SEC_E_INCOMPLETE_MESSAGE or Status == SEC_I_INCOMPLETE_CREDENTIALS:
             
             if len(recv_data) == 0 or Status == SEC_E_INCOMPLETE_MESSAGE:
-                data = self._sock.recv(1024, decrypt = False)
-                recv_data += data
+                if doRead:
+                    data = self._sock.recv(2048, raw = True)
+                    recv_data += data
+                else:
+                    doRead = True
             
-            
+
             inBufferGroup = SecBufferDesc()
             inBufferGroup.cBuffers = 2
             inBufferGroup.ulVersion = SECBUFFER_VERSION
@@ -248,7 +256,7 @@ class SSLContext(object):
             
             Status = self._securityFunc.InitializeSecurityContext(byref(self._creds),
                                                                   byref(self._context),
-                                                                  None,
+                                                                  c_wchar_p(self._server_hostname),
                                                                   dwSSPIFlags,
                                                                   0,
                                                                   SECURITY_NATIVE_DREP,
@@ -264,10 +272,10 @@ class SSLContext(object):
             if Status == SEC_E_OK or Status == SEC_I_CONTINUE_NEEDED:
                 if outBufferGroup.pBuffers[0].cbBuffer != 0 and outBufferGroup.pBuffers[0].pvBuffer is not None:             
                     data = string_at(outBufferGroup.pBuffers[0].pvBuffer, outBufferGroup.pBuffers[0].cbBuffer)
-                    if self._sock.sendall(data, encrypt = False) == 0:
+                    if self._sock.sendall(data, raw = True) == 0:
                         self._securityFunc.FreeContextBuffer(outBufferGroup.pBuffers[0].pvBuffer)
                         self._securityFunc.DeleteSecurityContext(byref(self._context))
-                        return SEC_E_INTERNAL_ERROR
+                        return (SEC_E_INTERNAL_ERROR, None)
                     else:
                         self._securityFunc.FreeContextBuffer(outBufferGroup.pBuffers[0].pvBuffer)
                         outBufferGroup.pBuffers[0].pvBuffer = None
@@ -286,7 +294,12 @@ class SSLContext(object):
                 recv_data = recv_data[-inBufferGroup.pBuffers[1].cbBuffer:]
             else:
                recv_data = b"" 
-            #return Status
+
+            
+            if Status == SEC_I_INCOMPLETE_CREDENTIALS:
+                #return (Status, None)
+                doRead = False
+                continue
 
         return (Status, None)
             
@@ -296,22 +309,27 @@ class SSLContext(object):
         self._securityFunc = func().contents
 
     
-    def _wrap_socket(self, sock, server_side, server_hostname):
+    def _wrap_socket(self, sock, server_side, server_hostname, client_certificate = None):
         self._sock = sock
         self._server_hostname = server_hostname
+        self._client_certificate = client_certificate
         
         return self
         
-    def _getCertSystemStore(self):
+    def _getCertSystemStore(self, storename):
         if self._CertSystemStore is not None:
             return self._CertSystemStore
         
-        self._CertSystemStore = CRYPT32.CertOpenSystemStoreW(None, "MY")
+        self._CertSystemStore = CRYPT32.CertOpenSystemStoreW(None, storename)
         return self._CertSystemStore
         
     def _ClientCreateCredentials(self):
         
-        self._SchannelCred.grbitEnabledProtocols = SP_PROT_SSL3_CLIENT
+        if self._client_certificate is not None:
+            self._SchannelCred.cCreds = 1
+            self._SchannelCred.paCred = pointer(self._client_certificate)
+        
+        self._SchannelCred.grbitEnabledProtocols = SP_PROT_SSL3_CLIENT #| SP_PROT_TLS1_1_CLIENT | SP_PROT_SSL2_CLIENT
         self._SchannelCred.dwVersion = SCHANNEL_CRED_VERSION
         self._SchannelCred.dwFlags |= SCH_CRED_NO_DEFAULT_CREDS | SCH_CRED_NO_SYSTEM_MAPPER | SCH_CRED_REVOCATION_CHECK_CHAIN
         
@@ -330,81 +348,119 @@ class SSLContext(object):
         if Status != SEC_E_OK:
             raise SSLError(WinError(Status))
     
-    def send(self, data, flags):
-        Sizes = SecPkgContext_StreamSizes()
-        Status = self._securityFunc.QueryContextAttributes(byref(self._context), SECPKG_ATTR_STREAM_SIZES, byref(Sizes))
-        if Status != SEC_E_OK:
-            raise SSLError(WinError(c_long(Status).value))
-        
-        #print(len(data), Sizes.cbMaximumMessage)
-        bufferValue = b'\x00' * Sizes.cbHeader + data + b'\x00' * Sizes.cbTrailer + (b'\x00' *(Sizes.cbMaximumMessage - len(data)))
-        #print(bufferValue)
-        allocatedBuffer = create_string_buffer(bufferValue)
-        
-        messageBuffers = SecBufferDesc()
-        messageBuffers.cBuffers = 4
-        messageBuffers.ulVersion = SECBUFFER_VERSION
-        
-        buffers = (SecBuffer * 4)()
-        
-        buffers[0].BufferType = SECBUFFER_STREAM_HEADER
-        buffers[0].cbBuffer = Sizes.cbHeader
-        buffers[0].pvBuffer = cast(byref(allocatedBuffer), c_void_p)
-        
-        buffers[1].BufferType = SECBUFFER_DATA
-        buffers[1].cbBuffer = len(data)
-        buffers[1].pvBuffer = cast(byref(allocatedBuffer, Sizes.cbHeader), c_void_p)
-        
-        buffers[2].BufferType = SECBUFFER_STREAM_TRAILER
-        buffers[2].cbBuffer = Sizes.cbTrailer
-        buffers[2].pvBuffer = cast(byref(allocatedBuffer, Sizes.cbHeader + len(data)), c_void_p)
-        
-        buffers[3].BufferType = SECBUFFER_EMPTY
-        
-        messageBuffers.pBuffers = buffers   
-                
-        Status = self._securityFunc.EncryptMessage(byref(self._context),0, byref(messageBuffers), 0)
-        
-        if Status != SEC_E_OK:
-            raise SSLError(WinError(c_long(Status).value))
-        
-        encrypted_data = string_at(byref(allocatedBuffer), buffers[0].cbBuffer + buffers[1].cbBuffer + buffers[2].cbBuffer)
-                
-        count = 0
-        amount = len(encrypted_data)
-        while count < amount:
-                v = self._sock.send(encrypted_data[count:], flags, encrypt = False)
-                count += v
-        return count
+    def send(self, data, flags = 0, plaintext = False):
+        if self._intialized is False and plaintext is True:
+            return self._sock.sendall(data, flags, raw = True)
+        else:        
+            Sizes = SecPkgContext_StreamSizes()
+            Status = self._securityFunc.QueryContextAttributes(byref(self._context), SECPKG_ATTR_STREAM_SIZES, byref(Sizes))
+            if Status != SEC_E_OK:
+                raise SSLError(WinError(c_long(Status).value))
             
-        
-       
-    def recv(self, buffersize, flags):
-        decrypted_data = b''
-        recv_data = self._sock.recv(buffersize, flags, decrypt = False)
-        
-        
-        messageBuffers = SecBufferDesc()
-        messageBuffers.cBuffers = 4
-        messageBuffers.ulVersion = SECBUFFER_VERSION
-        
-        buffers = (SecBuffer * 4)()
-        buffers[0].pvBuffer = cast(c_char_p(recv_data), c_void_p)
-        buffers[0].cbBuffer = len(recv_data)
-        buffers[0].BufferType = SECBUFFER_DATA
+
+            bufferValue = b'\x00' * Sizes.cbHeader + data + b'\x00' * Sizes.cbTrailer + (b'\x00' *(Sizes.cbMaximumMessage - len(data)))
+            allocatedBuffer = create_string_buffer(bufferValue)
+            
+            messageBuffers = SecBufferDesc()
+            messageBuffers.cBuffers = 4
+            messageBuffers.ulVersion = SECBUFFER_VERSION
+            
+            buffers = (SecBuffer * 4)()
+            
+            buffers[0].BufferType = SECBUFFER_STREAM_HEADER
+            buffers[0].cbBuffer = Sizes.cbHeader
+            buffers[0].pvBuffer = cast(byref(allocatedBuffer), c_void_p)
+            
+            buffers[1].BufferType = SECBUFFER_DATA
+            buffers[1].cbBuffer = len(data)
+            buffers[1].pvBuffer = cast(byref(allocatedBuffer, Sizes.cbHeader), c_void_p)
+            
+            buffers[2].BufferType = SECBUFFER_STREAM_TRAILER
+            buffers[2].cbBuffer = Sizes.cbTrailer
+            buffers[2].pvBuffer = cast(byref(allocatedBuffer, Sizes.cbHeader + len(data)), c_void_p)
+            
+            buffers[3].BufferType = SECBUFFER_EMPTY
+            
+            messageBuffers.pBuffers = buffers   
+                    
+            Status = self._securityFunc.EncryptMessage(byref(self._context),0, byref(messageBuffers), 0)
+            
+            if Status != SEC_E_OK:
+                raise SSLError(WinError(c_long(Status).value))
+            
+            encrypted_data = string_at(buffers[0].pvBuffer, buffers[0].cbBuffer + buffers[1].cbBuffer + buffers[2].cbBuffer)
+
+            return self._sock.sendall(encrypted_data, flags, raw = True)                
         
 
-        buffers[1].BufferType = SECBUFFER_EMPTY
-        buffers[2].BufferType = SECBUFFER_EMPTY
-        buffers[3].BufferType = SECBUFFER_EMPTY
+    def recv(self, buffersize, flags=0, plaintext = False):
         
-        messageBuffers.pBuffers = buffers        
-        Status = self._securityFunc.DecryptMessage(byref(self._context), byref(messageBuffers), 0, None)
+        if self._intialized is False and plaintext is True:
+            return self._sock.recv(buffersize, flags, raw = True)
+        else:
+            decrypted_data = b''
+            shouldContinue = True
+            while shouldContinue:
+                self._recv_buffer += self._sock.recv(buffersize, flags, raw = True)
+                
+                
+                messageBuffers = SecBufferDesc()
+                messageBuffers.cBuffers = 4
+                messageBuffers.ulVersion = SECBUFFER_VERSION
+                
+                buffers = (SecBuffer * 4)()
+                buffers[0].pvBuffer = cast(c_char_p(self._recv_buffer), c_void_p)
+                buffers[0].cbBuffer = len(self._recv_buffer)
+                buffers[0].BufferType = SECBUFFER_DATA
+                
         
-        for idx in range(4):
-            if messageBuffers.pBuffers[idx].BufferType == SECBUFFER_DATA:
-                decrypted_data += string_at(messageBuffers.pBuffers[idx].pvBuffer, messageBuffers.pBuffers[idx].cbBuffer)
-                break
+                buffers[1].BufferType = SECBUFFER_EMPTY
+                buffers[2].BufferType = SECBUFFER_EMPTY
+                buffers[3].BufferType = SECBUFFER_EMPTY
+                
+                messageBuffers.pBuffers = buffers        
+                Status = self._securityFunc.DecryptMessage(byref(self._context), byref(messageBuffers), 0, None)
+                
+                if Status == SEC_E_INCOMPLETE_MESSAGE:
+                    continue
+                
+                if Status != SEC_E_OK and Status != SEC_I_RENEGOTIATE:
+                    raise SSLError(WinError(c_long(Status).value))
+                
+                for idx in range(1,4):
+                    if messageBuffers.pBuffers[idx].BufferType == SECBUFFER_DATA:
+                        decrypted_data = string_at(messageBuffers.pBuffers[idx].pvBuffer, messageBuffers.pBuffers[idx].cbBuffer)
+                        break
+                    
+                extra_data = b''
+                for idx in range(1,4):
+                    if messageBuffers.pBuffers[idx].BufferType == SECBUFFER_EXTRA:
+                        extra_data = string_at(messageBuffers.pBuffers[idx].pvBuffer, messageBuffers.pBuffers[idx].cbBuffer)
+                        break
+                
+                if len(extra_data) > 0:
+                    self._recv_buffer = extra_data
+                    continue
+                else:
+                    self._recv_buffer = b''
+                    shouldContinue = False
+                
+                if Status == SEC_I_RENEGOTIATE:
+                    (Status, _) = self._ClientHandshakeLoop(doRead = False)
+                    shouldContinue = True
+                    if Status != SEC_E_OK:
+                        raise SSLError(WinError(c_long(Status).value))
+                elif Status != SEC_E_OK:
+                    raise SSLError(WinError(c_long(Status).value))
+                
+            return decrypted_data
+   
+   
+   
+    def select_client_certificate(self, storename = "MY"):
+        certStore = self._getCertSystemStore(storename)
+    
+        func = windll.Cryptui.CryptUIDlgSelectCertificateFromStore
+        certificatePointer = c_void_p(func(certStore, None, None, None, 0, 0, None))
         
-        return decrypted_data
-        
+        return certificatePointer
