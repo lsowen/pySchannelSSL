@@ -131,30 +131,19 @@ class SecurityFunctionTable(Structure):
 
 class SSLContext(object):
      
-    def __init__(self):
-        self._CertSystemStore = None
-        
+    def __init__(self):       
         self._InitSecurityInterface()
         self._creds = None
         self._context = _SecHandle()
         
         self._SchannelCred = None
         
-        self.reset()
-    
-    def __del__(self):
-        if self._CertSystemStore is not None:
-            CRYPT32.CertCloseStore(self._CertSystemStore, 0)        
+        self.reset()    
     
     def reset(self):
-        #if self._CertSystemStore is not None:
-        #    CRYPT32.CertCloseStore(self._CertSystemStore, 0)
-        
         if self._creds is not None:
             windll.Secur32.FreeCredentialsHandle(byref(self._creds))
         
-        self._CertSystemStore = None
-
         self._creds = _SecHandle()
         self._creds.dwUpper = 0;
         self._creds.dwLower = 0;
@@ -195,7 +184,7 @@ class SSLContext(object):
         dwSSPIFlags = ISC_REQ_SEQUENCE_DETECT | ISC_REQ_REPLAY_DETECT | ISC_REQ_CONFIDENTIALITY | ISC_REQ_EXTENDED_ERROR | ISC_REQ_ALLOCATE_MEMORY | ISC_REQ_STREAM
         
         dwSSPIOutFlags = DWORD()
-        
+
         Status = self._securityFunc.InitializeSecurityContext(byref(self._creds),
                                                               None,
                                                               c_wchar_p(self._server_hostname),
@@ -337,13 +326,6 @@ class SSLContext(object):
         
         return self
         
-    def _getCertSystemStore(self, storename):
-        if self._CertSystemStore is not None:
-            return self._CertSystemStore
-        
-        self._CertSystemStore = CRYPT32.CertOpenSystemStoreW(None, storename)
-        return self._CertSystemStore
-        
     def _ClientCreateCredentials(self):
         
         if self._client_certificate is not None:
@@ -483,13 +465,4 @@ class SSLContext(object):
                
             self._recv_buffer_decrypted = decrypted_data[buffersize:]
             return decrypted_data[:buffersize]
-   
-   
-   
-    def select_client_certificate(self, storename = "MY"):
-        certStore = self._getCertSystemStore(storename)
     
-        func = windll.Cryptui.CryptUIDlgSelectCertificateFromStore
-        certificatePointer = c_void_p(func(certStore, None, None, None, 0, 0, None))
-        
-        return certificatePointer
