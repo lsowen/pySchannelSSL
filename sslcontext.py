@@ -332,7 +332,7 @@ class SSLContext(object):
             self._SchannelCred.cCreds = 1
             self._SchannelCred.paCred = pointer(self._client_certificate)
         
-        self._SchannelCred.grbitEnabledProtocols = SP_PROT_SSL3_CLIENT #| SP_PROT_TLS1_1_CLIENT | SP_PROT_SSL2_CLIENT
+        self._SchannelCred.grbitEnabledProtocols = SP_PROT_TLS1_1_CLIENT #| SP_PROT_TLS1_1_CLIENT | SP_PROT_SSL2_CLIENT
         self._SchannelCred.dwVersion = SCHANNEL_CRED_VERSION
         self._SchannelCred.dwFlags |= SCH_CRED_NO_DEFAULT_CREDS | SCH_CRED_NO_SYSTEM_MAPPER | SCH_CRED_REVOCATION_CHECK_CHAIN
         
