@@ -14,6 +14,8 @@ SCHANNEL = windll.SChannel
 SCH_CRED_NO_SYSTEM_MAPPER = 0x00000002
 SCH_CRED_NO_DEFAULT_CREDS = 0x00000010
 SCH_CRED_REVOCATION_CHECK_CHAIN = 0x00000200
+SCH_CRED_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT = 0x00000400
+SCH_CRED_IGNORE_NO_REVOCATION_CHECK = 0x00000800
 
 SECPKG_ATTR_REMOTE_CERT_CONTEXT = 0x53
 SECPKG_ATTR_STREAM_SIZES = 4
@@ -334,7 +336,10 @@ class SSLContext(object):
         
         self._SchannelCred.grbitEnabledProtocols = SP_PROT_TLS1_1_CLIENT #| SP_PROT_TLS1_1_CLIENT | SP_PROT_SSL2_CLIENT
         self._SchannelCred.dwVersion = SCHANNEL_CRED_VERSION
-        self._SchannelCred.dwFlags |= SCH_CRED_NO_DEFAULT_CREDS | SCH_CRED_NO_SYSTEM_MAPPER | SCH_CRED_REVOCATION_CHECK_CHAIN
+        self._SchannelCred.dwFlags |= SCH_CRED_NO_DEFAULT_CREDS | \
+                                      SCH_CRED_NO_SYSTEM_MAPPER | \
+                                      SCH_CRED_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT | \
+                                      SCH_CRED_IGNORE_NO_REVOCATION_CHECK
         
         
         Status = self._securityFunc.AcquireCredentialsHandle(None, 
@@ -347,7 +352,6 @@ class SSLContext(object):
                                                              byref(self._creds),
                                                              POINTER(ULONG)())
 
-        
         if Status != SEC_E_OK:
             raise SSLError(WinError(Status))
     
@@ -393,13 +397,12 @@ class SSLContext(object):
             
             encrypted_data = string_at(buffers[0].pvBuffer, buffers[0].cbBuffer + buffers[1].cbBuffer + buffers[2].cbBuffer)
 
-            return self._sock.sendall(encrypted_data, flags, raw = True)                
-        
+            return self._sock.sendall(encrypted_data, flags, raw=True)
 
-    def recv(self, buffersize, flags=0, plaintext = False):
+    def recv(self, buffersize, flags=0, plaintext=False):
         
         if self._intialized is False and plaintext is True:
-            return self._sock.recv(buffersize, flags, raw = True)
+            return self._sock.recv(buffersize, flags, raw=True)
         else:
             
             if len(self._recv_buffer_decrypted) > 0:
@@ -461,8 +464,6 @@ class SSLContext(object):
                         raise SSLError(WinError(c_long(Status).value))
                 elif Status != SEC_E_OK:
                     raise SSLError(WinError(c_long(Status).value))
-            
-               
+
             self._recv_buffer_decrypted = decrypted_data[buffersize:]
             return decrypted_data[:buffersize]
-    
