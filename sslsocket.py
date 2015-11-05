@@ -103,10 +103,8 @@ class SSLSocket(socket):
         else:
             return socket.sendall(self, data, flags)
 
-    def send(self, data, flags=0, raw = False):
+    def send(self, data, flags=0, raw=False):
         if not raw:
-            #print("Send: {0}".format(data))
             return self._sslobj.send(data, flags)
         else:
-            #print("Send (Raw): {0}".format(data))
             return socket.send(self, data, flags)
